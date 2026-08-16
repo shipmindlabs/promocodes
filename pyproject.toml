@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "promocodes"
+version = "0.1.0"
+description = "Promotion engine: fixed and percentage discounts, validity windows, usage limits, per-customer codes and atomic redemption."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Shipmind Labs", email = "hello@shipmindlabs.com" }]
+keywords = ["promocode", "discount", "coupon", "promotion", "redemption"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/shipmindlabs/promocodes"
+Source = "https://github.com/shipmindlabs/promocodes"
+Issues = "https://github.com/shipmindlabs/promocodes/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/promocodes"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/promocodes", "README.md", "LICENSE"]
