@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Optional
 
 from .discounts import Discount
+from .money import Money
 from .validity import (
     Audience,
     UsageCounts,
@@ -30,6 +31,13 @@ class Rejection(Enum):
     CUSTOMER_LIMIT_REACHED = "the customer reached the per-customer limit"
     NOT_ASSIGNED = "the code is not assigned to this customer"
     CUSTOMER_REQUIRED = "the code can only be used by an identified customer"
+    BELOW_MINIMUM = "the order total is below the minimum this code requires"
+    TOTAL_REQUIRED = "the code can only be checked against a known order total"
+
+    @property
+    def slug(self) -> str:
+        """Machine-readable form for API payloads, e.g. ``"below_minimum"``."""
+        return self.name.lower()
 
 
 class PromoCodeRejected(ValueError):
@@ -50,6 +58,7 @@ class PromoCode:
     window: ValidityWindow = ValidityWindow()
     limits: UsageLimits = UsageLimits()
     audience: Audience = Audience()
+    minimum_total: Optional[Money] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.code, str):
@@ -74,10 +83,25 @@ class PromoCode:
             raise TypeError(
                 f"audience must be an Audience, got {type(self.audience).__name__}"
             )
+        if self.minimum_total is not None:
+            if not isinstance(self.minimum_total, Money):
+                raise TypeError(
+                    "minimum_total must be Money or None, got "
+                    f"{type(self.minimum_total).__name__}"
+                )
+            if self.minimum_total.is_negative:
+                raise ValueError(
+                    f"minimum_total cannot be negative: {self.minimum_total}"
+                )
 
     @property
     def is_public(self) -> bool:
         return self.audience.is_public
+
+    @property
+    def requires_total(self) -> bool:
+        """A minimum can only be enforced against a known order total."""
+        return self.minimum_total is not None
 
     def matches(self, entered: str) -> bool:
         """Return whether ``entered`` is this code, ignoring case and padding."""
@@ -88,11 +112,14 @@ class PromoCode:
         *,
         customer: Optional[str] = None,
         usage: UsageCounts = _NO_USAGE,
+        total: Optional[Money] = None,
         now: Optional[datetime] = None,
     ) -> Optional[Rejection]:
         """Return the reason the code cannot be used, or ``None`` if it can."""
         if not isinstance(usage, UsageCounts):
             raise TypeError(f"usage must be UsageCounts, got {type(usage).__name__}")
+        if total is not None and not isinstance(total, Money):
+            raise TypeError(f"total must be Money or None, got {type(total).__name__}")
         moment = datetime.now(timezone.utc) if now is None else now
         if customer is not None:
             customer = normalize_customer(customer)
@@ -109,6 +136,16 @@ class PromoCode:
             return Rejection.EXHAUSTED
         if self.limits.customer_reached(usage.for_customer):
             return Rejection.CUSTOMER_LIMIT_REACHED
+        if self.minimum_total is not None:
+            if total is None:
+                return Rejection.TOTAL_REQUIRED
+            if total.currency != self.minimum_total.currency:
+                raise ValueError(
+                    f"cannot check a {total.currency} total against a "
+                    f"{self.minimum_total.currency} minimum"
+                )
+            if total < self.minimum_total:
+                return Rejection.BELOW_MINIMUM
         return None
 
     def is_usable(
@@ -116,18 +153,34 @@ class PromoCode:
         *,
         customer: Optional[str] = None,
         usage: UsageCounts = _NO_USAGE,
+        total: Optional[Money] = None,
         now: Optional[datetime] = None,
     ) -> bool:
-        return self.check(customer=customer, usage=usage, now=now) is None
+        return (
+            self.check(customer=customer, usage=usage, total=total, now=now) is None
+        )
 
     def validate(
         self,
         *,
         customer: Optional[str] = None,
         usage: UsageCounts = _NO_USAGE,
+        total: Optional[Money] = None,
         now: Optional[datetime] = None,
     ) -> None:
         """Raise :class:`PromoCodeRejected` unless the code may be used."""
-        rejection = self.check(customer=customer, usage=usage, now=now)
+        rejection = self.check(customer=customer, usage=usage, total=total, now=now)
         if rejection is not None:
             raise PromoCodeRejected(self.code, rejection)
+
+    def apply(
+        self,
+        total: Money,
+        *,
+        customer: Optional[str] = None,
+        usage: UsageCounts = _NO_USAGE,
+        now: Optional[datetime] = None,
+    ) -> Money:
+        """Return ``total`` with the discount taken off, or raise the reason why not."""
+        self.validate(customer=customer, usage=usage, total=total, now=now)
+        return self.discount.apply(total)
