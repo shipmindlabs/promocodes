@@ -5,8 +5,8 @@ limits, per-customer codes and atomic redemption.
 
 ## Status
 
-Pre-alpha. Discount kinds and validity rules are implemented; atomic
-redemption is not yet.
+Pre-alpha. Discount kinds, validity rules and typed rejection reasons are
+implemented; atomic redemption is not yet.
 
 ## Installation
 
@@ -35,9 +35,9 @@ yields whole yen and EUR yields cents.
 
 ### Validity
 
-A code carries a half-open time window, a global cap, a per-customer cap and
-an audience. `check()` reports the first rule that stops a redemption, or
-`None` when the code may be used.
+A code carries a half-open time window, a global cap, a per-customer cap, an
+audience and an optional order minimum. `check()` reports the first rule that
+stops a redemption, or `None` when the code may be used.
 
 ```python
 from datetime import datetime, timedelta, timezone
@@ -72,10 +72,44 @@ comeback = PromoCode(
     audience=Audience.assigned_to("alice", "bob"),
 )
 comeback.check(customer="carol")  # Rejection.NOT_ASSIGNED
+
+# A code can also demand a basket of a certain size.
+shipping = PromoCode(
+    "SHIP5",
+    FixedDiscount(Money(Decimal("5.00"), "EUR")),
+    minimum_total=Money(Decimal("30.00"), "EUR"),
+)
+shipping.check(total=Money(Decimal("12.00"), "EUR"))  # Rejection.BELOW_MINIMUM
 ```
 
+### Why a code was refused
+
+Refusals are typed rather than a bare `False`, so a checkout API can tell the
+buyer what went wrong. `Rejection.value` is the human sentence and
+`Rejection.slug` the machine-readable key:
+
+```python
+rejection = shipping.check(total=Money(Decimal("12.00"), "EUR"))
+{"error": rejection.slug, "detail": rejection.value}
+# {'error': 'below_minimum',
+#  'detail': 'the order total is below the minimum this code requires'}
+```
+
+| slug | reported when |
+| --- | --- |
+| `not_started` | the validity window opens later |
+| `expired` | the validity window has closed |
+| `exhausted` | the global usage cap is reached |
+| `customer_limit_reached` | this customer used the code as often as allowed |
+| `not_assigned` | the code belongs to other customers |
+| `customer_required` | the rules need a customer and none was given |
+| `below_minimum` | the order total is under `minimum_total` |
+| `total_required` | the code has a minimum and no total was given |
+
 Timestamps must be timezone-aware; `check()` defaults to the current UTC time.
-`validate()` raises `PromoCodeRejected` instead of returning a reason.
+`is_usable()` collapses the reason to a bool, while `validate()` and `apply()`
+raise `PromoCodeRejected`, which carries the same reason on its `rejection`
+attribute.
 
 ## Development
 
