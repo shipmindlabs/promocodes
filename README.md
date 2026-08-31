@@ -5,8 +5,8 @@ limits, per-customer codes and atomic redemption.
 
 ## Status
 
-Pre-alpha. Discount kinds, validity rules and typed rejection reasons are
-implemented; atomic redemption is not yet.
+Pre-alpha. Discount kinds, validity rules, typed rejection reasons and atomic
+redemption are implemented.
 
 ## Installation
 
@@ -110,6 +110,82 @@ Timestamps must be timezone-aware; `check()` defaults to the current UTC time.
 `is_usable()` collapses the reason to a bool, while `validate()` and `apply()`
 raise `PromoCodeRejected`, which carries the same reason on its `rejection`
 attribute.
+
+### Atomic redemption
+
+`check()` only reads rules; spending a code is a write, and writes race. The
+classic bug is a webhook doing `used_count += 1` and then `save()`: two
+callbacks read the same number, both write it back, and a code capped at one
+redemption is spent twice.
+
+`redeem()` closes that gap. **A redemption is recorded only if the counters it
+was checked against are still the ones in storage.** If they moved, the write
+is refused, the counts are read again, the rules run again, and the caller
+either redeems against fresh counts or gets a normal `PromoCodeRejected`. A
+cap can therefore never be overspent, however many callbacks arrive at once.
+
+```python
+from promocodes import InMemoryRedemptionStore, redeem
+
+store = InMemoryRedemptionStore()
+order = Money(Decimal("80.00"), "EUR")
+
+receipt = redeem(welcome, store, order, customer="alice", now=now)
+receipt.discount            # 8.00 EUR
+receipt.total               # 72.00 EUR -> what is left to pay
+receipt.usage               # UsageCounts(total=1, for_customer=1)
+
+redeem(welcome, store, order, customer="alice", now=now)
+# PromoCodeRejected: WELCOME10: the customer reached the per-customer limit
+```
+
+Pass the payment provider's event id as `idempotency_key` and a redelivered
+webhook costs nothing: the redemption is returned again with
+`replayed=True` and no counter moves.
+
+#### The storage protocol
+
+`InMemoryRedemptionStore` is a reference implementation for tests and
+single-process use. In production, implement `RedemptionStore` on top of your
+own database:
+
+```python
+class RedemptionStore(Protocol):
+    def usage_for(self, code: str, *, customer: str | None) -> UsageCounts: ...
+
+    def record(
+        self,
+        code: str,
+        *,
+        customer: str | None,
+        expected: UsageCounts,
+        idempotency_key: str | None = None,
+    ) -> Reservation | None: ...
+```
+
+`usage_for()` may return a stale read; it only produces the value the rules are
+checked against. `record()` carries the guarantee and must compare and
+increment in one atomic step:
+
+```sql
+UPDATE promo_usage
+   SET total = total + 1,
+       for_customer = for_customer + 1
+ WHERE code = :code AND customer = :customer
+   AND total = :expected_total
+   AND for_customer = :expected_for_customer;
+```
+
+Zero affected rows means someone else redeemed first: return `None` and
+`redeem()` retries. Reading in one statement and writing in another -- or in
+another transaction -- does not satisfy the contract. Back
+`idempotency_key` with a unique constraint written in the same transaction as
+the increment, and return the stored counts as `Reservation(usage,
+replayed=True)` when the key is already known.
+
+When contention outlasts the retries (`attempts`, three by default),
+`redeem()` raises `RedemptionConflict`; that is a signal to retry the request
+higher up, not a refusal of the code.
 
 ## Development
 
