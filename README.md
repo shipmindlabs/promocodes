@@ -5,8 +5,8 @@ limits, per-customer codes and atomic redemption.
 
 ## Status
 
-Pre-alpha. Discount kinds, validity rules, typed rejection reasons and atomic
-redemption are implemented.
+Pre-alpha. Discount kinds, validity rules, typed rejection reasons, atomic
+redemption and capture-time re-validation are implemented.
 
 ## Installation
 
@@ -187,10 +187,51 @@ When contention outlasts the retries (`attempts`, three by default),
 `redeem()` raises `RedemptionConflict`; that is a signal to retry the request
 higher up, not a refusal of the code.
 
+### The second check, at capture time
+
+A cart is priced when the buyer builds it and charged when the payment
+provider confirms -- seconds later, or an hour later if the issuer asks for a
+challenge. In between, the window can close, the last redemption can be taken
+by somebody else, or the basket can shrink below the minimum. Checking only at
+checkout quietly grants discounts the rules no longer allow.
+
+`quote()` prices the cart, `capture()` runs every rule again against the clock
+and the counters of the moment the money moves:
+
+```python
+from promocodes import CaptureRejected, capture, quote
+
+cart = quote(welcome, order, customer="alice", now=now)
+cart.discount   # 8.00 EUR
+cart.payable    # 72.00 EUR -> what the payment intent is created for
+
+try:
+    receipt = capture(welcome, store, cart, now=payment_confirmed_at)
+except CaptureRejected as stale:
+    stale.rejection   # Rejection.EXPIRED -> good at checkout, not any more
+    stale.quote       # the quote that went stale
+```
+
+`CaptureRejected` is a `PromoCodeRejected`, so callers that only care about the
+refusal keep working, while a checkout API that wants to say "this code expired
+while you were paying" can catch the narrower type. Nothing is recorded when
+capture refuses.
+
+Pass the amount actually being charged as `total=` when the basket changed
+since checkout: the discount is recomputed against it, and a cart that fell
+under `minimum_total` is refused rather than discounted. Capture spends the
+code through `redeem()`, so the atomicity guarantee and `idempotency_key`
+apply unchanged.
+
+A quote is a frozen dataclass of plain values, so it can be stored next to the
+payment intent; `cart.is_expired(now)` answers the common case without loading
+the code.
+
 ## Development
 
 ```bash
-pip install -e .
+pip install -e ".[test]"
+python -m pytest
 ```
 
 ## License

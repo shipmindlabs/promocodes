@@ -1,5 +1,6 @@
 """Promotion engine for discounts, validity windows and atomic redemption."""
 
+from .capture import CaptureRejected, Quote, capture, quote
 from .codes import PromoCode, PromoCodeRejected, Rejection
 from .discounts import Discount, FixedDiscount, PercentageDiscount
 from .money import Money, minor_unit_exponent
@@ -21,6 +22,7 @@ from .validity import (
 
 __all__ = [
     "Audience",
+    "CaptureRejected",
     "Discount",
     "FixedDiscount",
     "InMemoryRedemptionStore",
@@ -28,6 +30,7 @@ __all__ = [
     "PercentageDiscount",
     "PromoCode",
     "PromoCodeRejected",
+    "Quote",
     "Redemption",
     "RedemptionConflict",
     "RedemptionStore",
@@ -37,8 +40,10 @@ __all__ = [
     "UsageLimits",
     "ValidityWindow",
     "__version__",
+    "capture",
     "minor_unit_exponent",
     "normalize_customer",
+    "quote",
     "redeem",
 ]
 
