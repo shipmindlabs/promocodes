@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Callable, Optional
 
@@ -21,6 +21,7 @@ from promocodes import (
     Reservation,
     UsageCounts,
     UsageLimits,
+    ValidityWindow,
     redeem,
 )
 
@@ -171,6 +172,109 @@ def test_a_redelivered_webhook_racing_itself_never_spends_twice():
     assert store.usage_for("EVT") == UsageCounts(1, 0)
 
 
+def test_a_replay_outlives_the_per_customer_cap_it_spent():
+    promo = PromoCode("ONCE", TEN, limits=UsageLimits(per_customer=1))
+    store = InMemoryRedemptionStore()
+
+    first = redeem(
+        promo,
+        store,
+        eur("50.00"),
+        customer="alice",
+        now=START,
+        idempotency_key="evt_1",
+    )
+    again = redeem(
+        promo,
+        store,
+        eur("50.00"),
+        customer="alice",
+        now=START,
+        idempotency_key="evt_1",
+    )
+
+    assert first.replayed is False
+    assert again.replayed is True
+    assert again.usage == first.usage == UsageCounts(1, 1)
+    assert again.discount == first.discount
+    assert again.total == first.total
+    assert store.usage_for("ONCE", customer="alice") == UsageCounts(1, 1)
+
+
+def test_a_replay_outlives_the_global_cap_it_spent():
+    promo = PromoCode(
+        "LASTONE", FixedDiscount(eur("5.00")), limits=UsageLimits(total=1)
+    )
+    store = InMemoryRedemptionStore()
+
+    first = redeem(promo, store, eur("40.00"), now=START, idempotency_key="evt_1")
+    again = redeem(promo, store, eur("40.00"), now=START, idempotency_key="evt_1")
+
+    assert again.replayed is True
+    assert again.usage == first.usage == UsageCounts(1, 0)
+    assert again.total == eur("35.00")
+    assert store.usage_for("LASTONE") == UsageCounts(1, 0)
+
+
+def test_a_replay_outlives_the_window_closing():
+    ends_at = START + timedelta(hours=1)
+    promo = PromoCode(
+        "FLASH",
+        TEN,
+        window=ValidityWindow(START, ends_at),
+        limits=UsageLimits(total=1, per_customer=1),
+    )
+    store = InMemoryRedemptionStore()
+
+    first = redeem(
+        promo,
+        store,
+        eur("80.00"),
+        customer="alice",
+        now=START,
+        idempotency_key="evt_1",
+    )
+    again = redeem(
+        promo,
+        store,
+        eur("80.00"),
+        customer="alice",
+        now=ends_at + timedelta(days=1),
+        idempotency_key="evt_1",
+    )
+
+    assert again.replayed is True
+    assert again.usage == first.usage == UsageCounts(1, 1)
+    assert store.usage_for("FLASH", customer="alice") == UsageCounts(1, 1)
+
+
+def test_a_different_key_is_a_new_redemption_and_meets_the_rules():
+    promo = PromoCode("ONCE", TEN, limits=UsageLimits(per_customer=1))
+    store = InMemoryRedemptionStore()
+
+    redeem(
+        promo,
+        store,
+        eur("50.00"),
+        customer="alice",
+        now=START,
+        idempotency_key="evt_1",
+    )
+
+    with pytest.raises(PromoCodeRejected) as refused:
+        redeem(
+            promo,
+            store,
+            eur("50.00"),
+            customer="alice",
+            now=START,
+            idempotency_key="evt_2",
+        )
+
+    assert refused.value.rejection is Rejection.CUSTOMER_LIMIT_REACHED
+    assert store.usage_for("ONCE", customer="alice") == UsageCounts(1, 1)
+
+
 def test_codes_do_not_share_counters_under_load():
     left = PromoCode("LEFT", TEN, limits=UsageLimits(total=1))
     right = PromoCode("RIGHT", TEN, limits=UsageLimits(total=1))
@@ -211,6 +315,11 @@ class SneakyStore:
     def usage_for(self, code: str, *, customer: Optional[str] = None) -> UsageCounts:
         self.reads += 1
         return self.inner.usage_for(code, customer=customer)
+
+    def replay_for(
+        self, code: str, *, idempotency_key: str
+    ) -> Optional[Reservation]:
+        return self.inner.replay_for(code, idempotency_key=idempotency_key)
 
     def record(
         self,
@@ -262,6 +371,11 @@ class NeverCommittingStore:
     def usage_for(self, code: str, *, customer: Optional[str] = None) -> UsageCounts:
         return UsageCounts()
 
+    def replay_for(
+        self, code: str, *, idempotency_key: str
+    ) -> Optional[Reservation]:
+        return None
+
     def record(
         self,
         code: str,
@@ -297,6 +411,11 @@ class FlakyStore:
     def usage_for(self, code: str, *, customer: Optional[str] = None) -> UsageCounts:
         return self.inner.usage_for(code, customer=customer)
 
+    def replay_for(
+        self, code: str, *, idempotency_key: str
+    ) -> Optional[Reservation]:
+        return self.inner.replay_for(code, idempotency_key=idempotency_key)
+
     def record(
         self,
         code: str,
@@ -331,11 +450,35 @@ def test_a_store_returning_the_wrong_type_is_a_programming_error():
         def usage_for(self, code, *, customer=None):
             return (0, 0)
 
+        def replay_for(self, code, *, idempotency_key):
+            return None
+
         def record(self, code, *, customer=None, expected, idempotency_key=None):
             raise AssertionError("record must not be reached")
 
     with pytest.raises(TypeError):
         redeem(PromoCode("OPEN", TEN), BadStore(), eur("80.00"), now=START)
+
+
+def test_a_store_replaying_the_wrong_type_is_a_programming_error():
+    class BadStore:
+        def usage_for(self, code, *, customer=None):
+            return UsageCounts()
+
+        def replay_for(self, code, *, idempotency_key):
+            return UsageCounts(1, 0)
+
+        def record(self, code, *, customer=None, expected, idempotency_key=None):
+            raise AssertionError("record must not be reached")
+
+    with pytest.raises(TypeError):
+        redeem(
+            PromoCode("OPEN", TEN),
+            BadStore(),
+            eur("80.00"),
+            now=START,
+            idempotency_key="evt_1",
+        )
 
 
 @pytest.mark.parametrize(
@@ -417,6 +560,23 @@ def test_the_reference_store_replays_a_known_key_without_incrementing():
     assert again.replayed is True
     assert again.usage == first.usage
     assert store.usage_for("SAVE10") == UsageCounts(1, 0)
+
+
+def test_the_reference_store_looks_up_a_recorded_key():
+    store = InMemoryRedemptionStore()
+
+    assert store.replay_for("SAVE10", idempotency_key="evt_1") is None
+
+    store.record(
+        "SAVE10", customer="alice", expected=UsageCounts(0, 0), idempotency_key="evt_1"
+    )
+
+    assert store.replay_for("  save10 ", idempotency_key="evt_1") == Reservation(
+        UsageCounts(1, 1), replayed=True
+    )
+    assert store.replay_for("SAVE10", idempotency_key="evt_2") is None
+    assert store.replay_for("OTHER", idempotency_key="evt_1") is None
+    assert store.usage_for("SAVE10", customer="alice") == UsageCounts(1, 1)
 
 
 def test_the_reference_store_rejects_counts_it_cannot_compare():

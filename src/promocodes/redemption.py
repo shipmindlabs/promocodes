@@ -18,6 +18,13 @@ compare-and-set. When the counters moved under us the store refuses the write,
 :func:`redeem` re-reads, re-runs the rules and tries again -- so the loser of a
 race either redeems against fresh counts or is rejected with the usual
 :class:`~promocodes.Rejection`. No caller can observe a count above the cap.
+
+Idempotency sits in front of all of it. A redelivered webhook carries the key
+of a redemption that already happened, so :meth:`RedemptionStore.replay_for`
+is consulted before any rule runs: a code capped at one redemption per
+customer would otherwise refuse its own replay with ``customer_limit_reached``,
+and a code whose window has closed since the payment would refuse it with
+``expired``.
 """
 
 from __future__ import annotations
@@ -95,6 +102,18 @@ class RedemptionStore(Protocol):
         holds. ``for_customer`` must be ``0`` when ``customer`` is ``None``.
         """
 
+    def replay_for(
+        self, code: str, *, idempotency_key: str
+    ) -> Optional[Reservation]:
+        """Return the redemption already recorded for ``idempotency_key``.
+
+        :func:`redeem` asks this before the rules run, so a redelivered
+        webhook is answered from its key instead of meeting the cap it spent
+        itself or a window that has closed since. Return ``None`` when the key
+        is unknown; a hit carries the counts stored for that key with
+        ``replayed=True`` and moves nothing.
+        """
+
     def record(
         self,
         code: str,
@@ -124,9 +143,10 @@ class RedemptionStore(Protocol):
 
         When ``idempotency_key`` is given, a key that was already recorded for
         this code must not increment anything a second time: return the counts
-        stored for that key with ``replayed=True``. Back the key with a unique
-        constraint written in the same transaction as the increment, so a
-        retried webhook cannot spend the code twice.
+        stored for that key with ``replayed=True``, as :meth:`replay_for`
+        would. Back the key with a unique constraint written in the same
+        transaction as the increment, so two deliveries that both miss the
+        lookup cannot spend the code twice.
         """
 
 
@@ -147,6 +167,16 @@ class InMemoryRedemptionStore:
         key, who = _normalize(code, customer)
         with self._lock:
             return self._counts(key, who)
+
+    def replay_for(
+        self, code: str, *, idempotency_key: str
+    ) -> Optional[Reservation]:
+        key, _ = _normalize(code, None)
+        with self._lock:
+            seen = self._keys.get((key, idempotency_key))
+        if seen is None:
+            return None
+        return Reservation(seen, replayed=True)
 
     def record(
         self,
@@ -198,8 +228,10 @@ def redeem(
 ) -> Redemption:
     """Spend ``code`` against ``total``, or raise the reason why it cannot be.
 
-    Raises :class:`~promocodes.PromoCodeRejected` when a rule refuses the code
-    and :class:`RedemptionConflict` when contention outlasted ``attempts``.
+    A known ``idempotency_key`` is answered with the redemption it already
+    recorded, before the rules are consulted. Raises
+    :class:`~promocodes.PromoCodeRejected` when a rule refuses the code and
+    :class:`RedemptionConflict` when contention outlasted ``attempts``.
     """
     if not isinstance(code, PromoCode):
         raise TypeError(f"code must be a PromoCode, got {type(code).__name__}")
@@ -222,6 +254,26 @@ def redeem(
             raise ValueError("idempotency_key cannot be empty")
 
     moment = datetime.now(timezone.utc) if now is None else now
+
+    if idempotency_key is not None:
+        replayed = store.replay_for(code.code, idempotency_key=idempotency_key)
+        if replayed is not None:
+            if not isinstance(replayed, Reservation):
+                raise TypeError(
+                    "replay_for must return a Reservation or None, got "
+                    f"{type(replayed).__name__}"
+                )
+            discount = code.discount.compute(total)
+            return Redemption(
+                code=code.code,
+                customer=customer,
+                discount=discount,
+                total=total - discount,
+                usage=replayed.usage,
+                redeemed_at=moment,
+                idempotency_key=idempotency_key,
+                replayed=True,
+            )
 
     for _ in range(attempts):
         usage = store.usage_for(code.code, customer=customer)

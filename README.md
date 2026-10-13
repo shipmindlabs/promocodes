@@ -252,8 +252,21 @@ redeem(welcome, store, order, customer="alice", now=checkout)
 ```
 
 Pass the payment provider's event id as `idempotency_key` and a redelivered
-webhook costs nothing: the redemption is returned again with `replayed=True`
-and no counter moves.
+webhook costs nothing. The key is looked up before any rule runs, so a replay
+is answered with the redemption it already made instead of meeting the cap it
+spent itself or a window that has closed since:
+
+```python
+paid = redeem(
+    welcome, store, order, customer="bob", now=checkout, idempotency_key="evt_1"
+)
+again = redeem(
+    welcome, store, order, customer="bob", now=checkout, idempotency_key="evt_1"
+)
+
+again.replayed              # True
+again.usage == paid.usage   # True -- no counter moved
+```
 
 ### The storage contract
 
@@ -266,6 +279,10 @@ across threads but not across processes. In production, implement
 class RedemptionStore(Protocol):
     def usage_for(self, code: str, *, customer: str | None) -> UsageCounts: ...
 
+    def replay_for(
+        self, code: str, *, idempotency_key: str
+    ) -> Reservation | None: ...
+
     def record(
         self,
         code: str,
@@ -277,7 +294,9 @@ class RedemptionStore(Protocol):
 ```
 
 `usage_for()` may return a stale read; it only produces the value the rules are
-checked against. `record()` carries the guarantee and must compare and
+checked against. `replay_for()` is the key lookup `redeem()` asks first: return
+`Reservation(usage, replayed=True)` for a key you already stored and `None` for
+one you have never seen. `record()` carries the guarantee and must compare and
 increment in one atomic step:
 
 ```sql
@@ -292,9 +311,9 @@ UPDATE promo_usage
 Zero affected rows means someone else redeemed first: return `None` and
 `redeem()` retries. Reading in one statement and writing in another -- or in
 another transaction -- does not satisfy the contract. Back `idempotency_key`
-with a unique constraint written in the same transaction as the increment, and
-return the stored counts as `Reservation(usage, replayed=True)` when the key is
-already known.
+with a unique constraint written in the same transaction as the increment, so
+two deliveries that both miss the lookup cannot spend the code twice; `record()`
+then answers the loser with `Reservation(usage, replayed=True)` as well.
 
 When contention outlasts the retries (`attempts`, three by default),
 `redeem()` raises `RedemptionConflict`; that is a signal to retry the request
@@ -330,7 +349,8 @@ Pass the amount actually being charged as `total=` when the basket changed
 since checkout: the discount is recomputed against it, and a cart that fell
 under `minimum_total` is refused rather than discounted. Capture spends the
 code through `redeem()`, so the atomicity guarantee and `idempotency_key`
-apply unchanged.
+apply unchanged -- including the replay, which is answered from the key even
+when the window has closed in the meantime.
 
 A quote is a frozen dataclass of plain values, so it can be stored next to the
 payment intent; `cart.is_expired(now)` answers the common case without loading
