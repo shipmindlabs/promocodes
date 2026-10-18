@@ -337,5 +337,6 @@ def test_every_rejection_carries_a_sentence_and_a_slug():
         "customer_required",
         "below_minimum",
         "total_required",
+        "terms_changed",
     }
     assert all(rejection.value.strip() for rejection in Rejection)

@@ -121,6 +121,63 @@ def test_capture_refuses_a_quote_whose_cap_was_spent_meanwhile():
     assert store.usage_for("LASTONE") == UsageCounts(1, 0)
 
 
+def test_capture_refuses_a_campaign_edited_since_the_quote():
+    quoted_at_ten = PromoCode("SAVE10", PercentageDiscount(Decimal("10")))
+    store = InMemoryRedemptionStore()
+    cart = quote(quoted_at_ten, eur("80.00"), customer="alice", now=START)
+
+    edited = PromoCode("SAVE10", PercentageDiscount(Decimal("5")))
+
+    with pytest.raises(CaptureRejected) as refused:
+        capture(edited, store, cart, now=START + timedelta(minutes=2))
+
+    assert refused.value.rejection is Rejection.TERMS_CHANGED
+    assert refused.value.quote is cart
+    assert isinstance(refused.value, PromoCodeRejected)
+    assert store.usage_for("SAVE10", customer="alice") == UsageCounts(0, 0)
+
+
+def test_capture_refuses_a_fixed_amount_that_was_raised():
+    store = InMemoryRedemptionStore()
+    cart = quote(
+        PromoCode("SHIP5", FixedDiscount(eur("5.00"))), eur("40.00"), now=START
+    )
+
+    edited = PromoCode("SHIP5", FixedDiscount(eur("12.00")))
+
+    with pytest.raises(CaptureRejected) as refused:
+        capture(edited, store, cart, now=START)
+
+    assert refused.value.rejection is Rejection.TERMS_CHANGED
+    assert store.usage_for("SHIP5") == UsageCounts(0, 0)
+
+
+def test_a_discount_worth_the_same_amount_is_not_a_change():
+    store = InMemoryRedemptionStore()
+    cart = quote(
+        PromoCode("SAVE10", PercentageDiscount(Decimal("10"))), eur("80.00"), now=START
+    )
+
+    rewritten = PromoCode("SAVE10", FixedDiscount(eur("8.00")))
+    receipt = capture(rewritten, store, cart, now=START)
+
+    assert receipt.discount == cart.discount
+    assert receipt.total == cart.payable
+
+
+def test_an_explicit_total_charges_the_terms_of_the_moment():
+    store = InMemoryRedemptionStore()
+    cart = quote(
+        PromoCode("SAVE10", PercentageDiscount(Decimal("10"))), eur("80.00"), now=START
+    )
+
+    edited = PromoCode("SAVE10", PercentageDiscount(Decimal("5")))
+    receipt = capture(edited, store, cart, total=eur("80.00"), now=START)
+
+    assert receipt.discount == eur("4.00")
+    assert receipt.total == eur("76.00")
+
+
 def test_capture_reprices_the_amount_actually_charged():
     promo = PromoCode("HALF", PercentageDiscount(Decimal("50")))
     store = InMemoryRedemptionStore()

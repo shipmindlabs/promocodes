@@ -33,6 +33,7 @@ class Rejection(Enum):
     CUSTOMER_REQUIRED = "the code can only be used by an identified customer"
     BELOW_MINIMUM = "the order total is below the minimum this code requires"
     TOTAL_REQUIRED = "the code can only be checked against a known order total"
+    TERMS_CHANGED = "the discount changed since the code was quoted"
 
     @property
     def slug(self) -> str:

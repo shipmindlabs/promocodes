@@ -2,9 +2,10 @@
 
 A cart is priced when the buyer builds it and charged when the payment
 provider confirms. Between those two moments the validity window can close,
-the last redemption can be taken by somebody else, or the basket can shrink
-below the minimum the code demands. Checking once, at checkout, hands out
-discounts the rules no longer allow.
+the last redemption can be taken by somebody else, the basket can shrink
+below the minimum the code demands, or the campaign itself can be edited into
+a different discount. Checking once, at checkout, hands out discounts the
+rules no longer allow -- and charges amounts the buyer never saw.
 
 :func:`quote` prices the cart; :func:`capture` runs every rule again against
 the clock and the counters of the moment the money moves, and refuses with
@@ -105,11 +106,15 @@ def capture(
 ) -> Redemption:
     """Spend the code behind ``quoted``, re-running every rule at payment time.
 
-    Pass ``total`` when the basket changed since checkout: the discount is
-    recomputed against the amount actually charged. Raises
-    :class:`CaptureRejected` when a rule refuses the code now and
-    :class:`~promocodes.RedemptionConflict` when contention outlasted
-    ``attempts``. Nothing is recorded unless the code passes the second check.
+    With no ``total``, the discount is recomputed on the quoted total and a
+    campaign that was edited since the quote is refused with
+    :attr:`~promocodes.Rejection.TERMS_CHANGED` rather than charging an amount
+    the buyer never saw. Pass ``total`` when the basket changed since
+    checkout: the discount is then recomputed against the amount actually
+    charged, on the terms of the moment. Raises :class:`CaptureRejected` when
+    a rule refuses the code now and :class:`~promocodes.RedemptionConflict`
+    when contention outlasted ``attempts``. Nothing is recorded unless the
+    code passes the second check.
     """
     if not isinstance(promo, PromoCode):
         raise TypeError(f"promo must be a PromoCode, got {type(promo).__name__}")
@@ -122,6 +127,9 @@ def capture(
 
     charged = quoted.total if total is None else total
     moment = datetime.now(timezone.utc) if now is None else now
+
+    if total is None and promo.discount.compute(quoted.total) != quoted.discount:
+        raise CaptureRejected(promo.code, Rejection.TERMS_CHANGED, quoted)
 
     try:
         return redeem(

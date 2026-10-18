@@ -184,6 +184,7 @@ rejection = shipping.check(total=Money(Decimal("12.00"), "EUR"))
 | `customer_required` | the rules need a customer and none was given |
 | `below_minimum` | the order total is under `minimum_total` |
 | `total_required` | the code has a minimum and no total was given |
+| `terms_changed` | the discount changed between quote and capture (never from `check()`) |
 
 `is_usable()` collapses the reason to a bool, while `validate()` and `apply()`
 raise `PromoCodeRejected`, which carries the same reason on its `rejection`
@@ -345,12 +346,31 @@ refusal keep working, while a checkout API that wants to say "this code expired
 while you were paying" can catch the narrower type. Nothing is recorded when
 capture refuses.
 
+### The terms can change too
+
+A quote and a code agree on the code string, and nothing else. A campaign
+edited between checkout and confirmation -- ten percent turned into five, a
+fixed amount raised -- would therefore charge an amount the buyer never saw.
+So `capture()` recomputes the discount on the quoted total before spending
+anything, and refuses a result other than the quoted one:
+
+```python
+edited = PromoCode("WELCOME10", PercentageDiscount(Decimal("5")))
+
+capture(edited, store, cart, now=payment_confirmed_at)
+# CaptureRejected: WELCOME10: the discount changed since the code was quoted
+```
+
+What is compared is the money, not the campaign: a discount rewritten into a
+different kind that is worth exactly the same on this basket charges the buyer
+what they agreed to and passes.
+
 Pass the amount actually being charged as `total=` when the basket changed
-since checkout: the discount is recomputed against it, and a cart that fell
+since checkout: the discount is recomputed against it on the terms of the
+moment, the quoted amount is no longer the reference, and a cart that fell
 under `minimum_total` is refused rather than discounted. Capture spends the
 code through `redeem()`, so the atomicity guarantee and `idempotency_key`
-apply unchanged -- including the replay, which is answered from the key even
-when the window has closed in the meantime.
+apply unchanged.
 
 A quote is a frozen dataclass of plain values, so it can be stored next to the
 payment intent; `cart.is_expired(now)` answers the common case without loading
