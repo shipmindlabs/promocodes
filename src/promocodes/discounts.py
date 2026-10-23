@@ -5,6 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
+from typing import Optional
 
 from .money import Money
 
@@ -56,9 +57,14 @@ class FixedDiscount(Discount):
 
 @dataclass(frozen=True, slots=True)
 class PercentageDiscount(Discount):
-    """Takes a percentage of the order total, rounded to the currency unit."""
+    """Takes a percentage of the order total, rounded to the currency unit.
+
+    ``up_to`` caps what the percentage may be worth, the usual "20% off, up to
+    10 EUR" rule.
+    """
 
     percent: Decimal
+    up_to: Optional[Money] = None
     rounding: str = ROUND_HALF_UP
 
     def __post_init__(self) -> None:
@@ -75,8 +81,25 @@ class PercentageDiscount(Discount):
             raise ValueError(f"percent must be between 0 and 100, got {percent}")
         object.__setattr__(self, "percent", percent)
 
+        cap = self.up_to
+        if cap is not None:
+            if not isinstance(cap, Money):
+                raise TypeError(
+                    f"up_to must be Money or None, got {type(cap).__name__}"
+                )
+            if cap.is_negative:
+                raise ValueError(f"a discount cap cannot be negative: {cap}")
+
     def _amount_for(self, total: Money) -> Money:
         # Shifting by two digits keeps the product exact, so the only rounding
         # that happens is the explicit one below.
         raw = (total.amount * self.percent).scaleb(-2)
-        return Money(raw, total.currency).quantize(self.rounding)
+        amount = Money(raw, total.currency).quantize(self.rounding)
+        if self.up_to is None:
+            return amount
+        if self.up_to.currency != total.currency:
+            raise ValueError(
+                f"cannot cap a {total.currency} discount at a "
+                f"{self.up_to.currency} amount"
+            )
+        return min(amount, self.up_to)

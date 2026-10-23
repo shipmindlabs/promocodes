@@ -100,6 +100,21 @@ in, so JPY yields whole yen and EUR yields cents. A percentage outside 0 to
 100, a negative fixed amount, or a discount in a different currency than the
 total is a programming error and raises instead of being quietly reinterpreted.
 
+A percentage can carry a ceiling -- the usual "20% off, up to 10 EUR":
+
+```python
+twenty_capped = PercentageDiscount(
+    Decimal("20"), up_to=Money(Decimal("10.00"), "EUR")
+)
+
+twenty_capped.compute(Money(Decimal("100.00"), "EUR"))  # 10.00 EUR -- not 20.00
+twenty_capped.compute(Money(Decimal("30.00"), "EUR"))   # 6.00 EUR -- under the cap
+```
+
+The cap applies before the discount is clamped to the order total, so both
+bounds hold at once. A negative `up_to` raises at construction; a cap in
+another currency than the total raises when the discount is computed.
+
 ### Validity window
 
 `ValidityWindow(starts_at, ends_at)` is half-open: the code is live on the
@@ -215,9 +230,9 @@ something sensible are refused loudly instead:
 
 - a negative order total raises `ValueError` -- a basket that owes money is a
   bug upstream, not a discount to compute;
-- a negative `FixedDiscount` or a percentage outside 0 to 100 raises at
-  construction, so a broken campaign fails when it is defined rather than at
-  the first checkout;
+- a negative `FixedDiscount`, a percentage outside 0 to 100, or a negative
+  `up_to` cap raises at construction, so a broken campaign fails when it is
+  defined rather than at the first checkout;
 - a discount whose currency differs from the total raises instead of
   comparing numbers that mean different things.
 
